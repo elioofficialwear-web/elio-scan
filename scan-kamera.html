@@ -95,6 +95,9 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
   <input id="user" autocomplete="username" autocapitalize="none" spellcheck="false">
   <label for="sandi">Password</label>
   <input id="sandi" type="password" autocomplete="current-password">
+  <label for="alat" style="margin-top:4px">Nama alat ini</label>
+  <input id="alat" autocomplete="off" placeholder="mis. HP Gudang 1 / HP Rina">
+  <div class="sub" style="margin:-6px 0 12px">Supaya HP ini tidak perlu login lagi nanti. Nama ini yang Anda lihat di ELIO kalau suatu saat perlu mencabut aksesnya.</div>
   <button id="tblMasuk">Masuk</button>
   <div id="pesanMasuk"></div>
 </section>
@@ -127,8 +130,11 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
     <div class="baris" style="margin-top:4px">
       <button class="sunyi" id="tblBersih">Bersihkan daftar</button>
       <button class="sunyi" id="tblUlang">Nyalakan ulang kamera</button>
-      <button class="sunyi" id="tblKeluar">Keluar</button>
     </div>
+    <div class="baris" style="margin-top:8px">
+      <button class="sunyi" id="tblKeluar">Keluar dari HP ini</button>
+    </div>
+    <div class="sub">Keluar akan melupakan HP ini sepenuhnya, jadi lain kali harus login lagi. Untuk pemakaian sehari-hari cukup tutup halamannya.</div>
   </div>
 
   <details>
@@ -148,6 +154,11 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
 
 /* ===================== Penyimpanan kecil di HP ===================== */
 var KUNCI_URL='elioScanUrl', KUNCI_TOKEN='elioScanToken', KUNCI_USER='elioScanUser';
+/* Token ALAT: didapat sekali sesudah login berhasil, lalu dipakai terus tanpa kedaluwarsa.
+   Kewenangannya sengaja sempit - hanya boleh menambah baris Scan Barcode, tidak bisa membaca atau
+   menghapus apa pun (lihat doPost di WebApp.gs). Karena itu menyimpannya di HP aman, sementara
+   menyimpan password TIDAK PERNAH aman dan tidak pernah dilakukan halaman ini. */
+var KUNCI_ALAT='elioScanAlat', KUNCI_ALATNAMA='elioScanAlatNama';
 function ambil(k){ try{ return localStorage.getItem(k)||''; }catch(e){ return ''; } }
 function simpan(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
 function buang(k){ try{ localStorage.removeItem(k); }catch(e){} }
@@ -302,7 +313,9 @@ function kirim(){
   if(sedangKirim || !antri.length) return;
   sedangKirim=true;
   var batch=antri.splice(0,MAKS_SEKALI);
-  kirimKeElio({aksi:'scan', token:ambil(KUNCI_TOKEN), resi:batch, catatan:el('catatan').value||''})
+  var muatan={aksi:'scan', resi:batch, catatan:el('catatan').value||''};
+  if(ambil(KUNCI_ALAT)) muatan.alat=ambil(KUNCI_ALAT); else muatan.token=ambil(KUNCI_TOKEN);
+  kirimKeElio(muatan)
     .then(function(h){
       var lewat=(h.dilewati||[]).map(normal);
       tandai(batch.filter(function(r){ return lewat.indexOf(r)<0; }),'tersimpan');
@@ -322,7 +335,10 @@ function kirim(){
       bunyi('gagal');
       var kehabisanSesi=/[Ss]esi/.test(e.message||'');
       pesan('pesanScan','gagal','Gagal mengirim: '+(e.message||e)+(kehabisanSesi?' Masuk lagi untuk melanjutkan.':' Nomornya masih tersimpan dan akan dicoba lagi.'));
-      if(kehabisanSesi) keluar(true);
+      /* Token alat tidak kedaluwarsa, jadi pesan "sesi berakhir" hanya berlaku untuk jalur sesi
+         biasa. Kalau alat yang dipakai, pesan itu berarti alatnya DICABUT - dan itu memang harus
+         mengeluarkan HP ini sepenuhnya. */
+      if(kehabisanSesi||/dicabut/i.test(e.message||'')) keluar(!ambil(KUNCI_ALAT));
     })
     .then(function(){
       sedangKirim=false; gambar();
@@ -424,10 +440,22 @@ function tampilkanScan(nama){
 function keluar(karenaSesi){
   matikanKamera();
   buang(KUNCI_TOKEN);
+  if(!karenaSesi){ buang(KUNCI_ALAT); buang(KUNCI_ALATNAMA); }
   el('layarScan').hidden=true;
   el('layarMasuk').hidden=false;
   el('siapa').textContent='';
+  el('alat').value=ambil(KUNCI_ALATNAMA);
   if(karenaSesi) pesan('pesanMasuk','awas','Sesi berakhir. Masuk lagi untuk melanjutkan — nomor yang belum terkirim tetap ada di daftar.');
+}
+/* Mendaftarkan HP ini supaya tidak perlu login lagi. Gagal mendaftar BUKAN alasan menggagalkan
+   masuk: petugas tetap bisa scan sesi ini dengan token sesi biasa, dan tinggal login lagi nanti. */
+function daftarkanAlat(namaAlat){
+  return kirimKeElio({aksi:'daftarAlat', token:ambil(KUNCI_TOKEN), nama:namaAlat})
+    .then(function(h){ simpan(KUNCI_ALAT,h.alat); simpan(KUNCI_ALATNAMA,h.nama||namaAlat); return h; })
+    .catch(function(e){
+      pesan('pesanScan','awas','HP ini belum bisa didaftarkan ('+(e.message||e)+'). Scan tetap bisa dipakai sekarang, tapi nanti perlu login lagi.');
+      return null;
+    });
 }
 
 el('tblMasuk').onclick=function(){
@@ -443,12 +471,16 @@ el('tblMasuk').onclick=function(){
   pesan('pesanMasuk','awas','Menghubungi Spreadsheet ELIO…');
   var tbl=this;
   konteks();
+  const namaAlat=el('alat').value.trim()||'HP tanpa nama';
   kirimKeElio({aksi:'login', username:u, password:s})
     .then(function(h){
       simpan(KUNCI_TOKEN,h.token); simpan(KUNCI_USER,h.nama||u);
       el('sandi').value='';
       pesan('pesanMasuk','','');
       tampilkanScan(h.nama||u);
+      /* Dijalankan SESUDAH layar scan terbuka, bukan sebelum: kameranya sudah bisa dipakai sambil
+         pendaftaran berjalan di latar. */
+      return daftarkanAlat(namaAlat);
     })
     .catch(function(e){ pesan('pesanMasuk','gagal',e.message||String(e)); })
     .then(function(){ tbl.disabled=false; });
@@ -474,9 +506,28 @@ document.addEventListener('visibilitychange',function(){
 (function(){
   el('url').value=ambil(KUNCI_URL);
   el('user').value=ambil(KUNCI_USER);
+  el('alat').value=ambil(KUNCI_ALATNAMA);
+  if(!ambil(KUNCI_URL)) return;
+
+  /* Urutannya penting. Token ALAT dulu: itu yang tidak kedaluwarsa, jadi jalur inilah yang dipakai
+     sehari-hari - buka halaman, kamera langsung menyala, tanpa mengetik apa pun. Diperiksa dulu ke
+     server supaya kalau Owner sudah mencabut alat ini, petugas tahu SEKARANG, bukan sesudah tiga
+     puluh paket ditembak. */
+  var alat=ambil(KUNCI_ALAT);
+  if(alat){
+    pesan('pesanMasuk','awas','Memeriksa HP ini…');
+    kirimKeElio({aksi:'cekAlat', alat:alat})
+      .then(function(h){ pesan('pesanMasuk','',''); tampilkanScan(h.nama); })
+      .catch(function(e){
+        buang(KUNCI_ALAT);
+        pesan('pesanMasuk','awas',(e.message||'HP ini tidak lagi terdaftar.')+' Silakan masuk lagi.');
+      });
+    return;
+  }
+
   var token=ambil(KUNCI_TOKEN);
-  if(!token||!ambil(KUNCI_URL)) return;
-  /* Sesi diperiksa dulu ke server - lebih baik tahu sekarang daripada sesudah 30 paket ditembak. */
+  if(!token) return;
+  /* Sesi biasa: hanya berlaku sekitar sejam. Dipakai kalau pendaftaran alat gagal sebelumnya. */
   pesan('pesanMasuk','awas','Memeriksa sesi yang tersimpan…');
   kirimKeElio({aksi:'cek', token:token})
     .then(function(h){ pesan('pesanMasuk','',''); tampilkanScan(h.nama); })
