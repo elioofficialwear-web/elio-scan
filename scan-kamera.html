@@ -125,6 +125,7 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
     <input id="manual" autocomplete="off" autocapitalize="characters" spellcheck="false"
            placeholder="Ketik nomor resi lalu Enter">
     <div class="baris" style="margin-top:4px">
+      <button class="sunyi" id="tblBersih">Bersihkan daftar</button>
       <button class="sunyi" id="tblUlang">Nyalakan ulang kamera</button>
       <button class="sunyi" id="tblKeluar">Keluar</button>
     </div>
@@ -209,7 +210,16 @@ function bunyi(jenis){
 
 /* ===================== Keadaan ===================== */
 var daftar=[];              /* {resi, status: 'antri'|'tersimpan'|'gagal', jam} */
-var sudahAda={};            /* penyaring kembar di HP, sebelum menyentuh server sama sekali */
+/* KESALAHAN YANG DIPERBAIKI DI SINI: dulu ini bernama sudahAda dan menolak SELAMANYA setiap resi
+   yang pernah terbaca di sesi ini. Akibatnya, kalau barisnya sudah dihapus di ELIO dan Spreadsheet
+   sudah kosong, halaman ini TETAP menolak - ia mengingat sesuatu yang sudah tidak ada lagi, dan
+   satu-satunya jalan keluar adalah memuat ulang halaman, yang tidak terpikirkan oleh siapa pun.
+   Yang benar: SERVER adalah satu-satunya yang tahu resi mana yang sudah tersimpan, karena hanya ia
+   yang melihat isi Spreadsheet saat ini. Penyaring di HP ini sekarang hanya berumur pendek, dan
+   tugasnya cuma satu: menahan kamera yang membaca barcode yang SAMA berkali-kali selama label itu
+   masih ada di depan lensa (loop pemindai berjalan tiap 400 ms). */
+var terlihat={};            /* resi -> waktu terakhir terbaca kamera */
+var JEDA_ULANG_MS=4000;
 var antri=[];
 var sedangKirim=false, jadwal=null;
 var JEDA_KIRIM_MS=800, MAKS_SEKALI=25;
@@ -241,22 +251,43 @@ function pesan(kotak,kelas,teks){
 }
 
 var nTolak=0;
+function cariEntri(resi){
+  for(var i=0;i<daftar.length;i++)if(daftar[i].resi===resi)return daftar[i];
+  return null;
+}
 function tambah(v){
   var resi=normal(v);
   if(!resi) return;
-  if(sudahAda[resi]){
-    nTolak++; el('nTolak').textContent=nTolak;
-    bunyi('kembar');
-    pesan('pesanScan','gagal','DITOLAK — resi '+resi+' sudah discan di sesi ini.');
-    return;
+  var kini=Date.now();
+  /* Label yang sama masih di depan lensa - diabaikan tanpa suara dan tanpa pesan. Ini BUKAN
+     penolakan resi kembar; membunyikan bip di sini akan berbunyi terus-menerus. */
+  if(terlihat[resi]&&(kini-terlihat[resi])<JEDA_ULANG_MS)return;
+  terlihat[resi]=kini;
+
+  var lama=cariEntri(resi);
+  if(lama){
+    /* Pernah terbaca di sesi ini, tapi sudah lewat jeda - berarti memang ditembak ulang dengan
+       sengaja. Dikirim lagi ke server, dan SERVER yang memutuskan: kalau barisnya sudah dihapus
+       di ELIO, resi ini diterima seperti baru; kalau masih ada, server yang menolaknya. */
+    lama.status='antri'; lama.jam=jamSekarang();
+    if(antri.indexOf(resi)<0)antri.push(resi);
+  }else{
+    daftar.push({resi:resi,status:'antri',jam:jamSekarang()});
+    antri.push(resi);
   }
-  sudahAda[resi]=true;
-  daftar.push({resi:resi,status:'antri',jam:jamSekarang()});
-  antri.push(resi);
   bunyi('ok');
   pesan('pesanScan','ok','Terbaca: '+resi);
   gambar();
   jadwalkan();
+}
+/* Mulai daftar dari nol tanpa memuat ulang halaman - dipakai saat berganti sesi pickup, atau
+   setelah membersihkan data di ELIO. Tidak menyentuh apa pun di Spreadsheet. */
+function bersihkanDaftar(){
+  daftar=[];terlihat={};antri=[];nTolak=0;
+  if(jadwal){clearTimeout(jadwal);jadwal=null}
+  el('nTolak').textContent='0';
+  pesan('pesanScan','','');
+  gambar();
 }
 function jadwalkan(){
   if(antri.length>=MAKS_SEKALI) return kirim();
@@ -279,7 +310,8 @@ function kirim(){
         tandai(lewat,'gagal');
         nTolak+=lewat.length; el('nTolak').textContent=nTolak;
         bunyi('kembar');
-        pesan('pesanScan','gagal',lewat.length+' resi ditolak server karena sudah pernah discan sebelumnya: '+lewat.slice(0,3).join(', '));
+        pesan('pesanScan','gagal','DITOLAK — '+lewat.slice(0,3).join(', ')+
+          (lewat.length>3?' (+'+(lewat.length-3)+' lagi)':'')+' sudah ada di Spreadsheet ELIO.');
       }
     })
     .catch(function(e){
@@ -421,6 +453,7 @@ el('tblMasuk').onclick=function(){
     .catch(function(e){ pesan('pesanMasuk','gagal',e.message||String(e)); })
     .then(function(){ tbl.disabled=false; });
 };
+el('tblBersih').onclick=bersihkanDaftar;
 el('tblUlang').onclick=nyalakanKamera;
 el('tblKeluar').onclick=function(){ keluar(false); };
 el('manual').addEventListener('keydown',function(e){
