@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ELIO - Scan Kamera</title>
+<!--
+  HALAMAN SCAN KAMERA ELIO - dijalankan DI LUAR Google Apps Script.
+
+  Kenapa berkas ini ada:
+  Google menyajikan Web App Apps Script di dalam iframe sandbox (googleusercontent.com) yang TIDAK
+  diberi izin kamera lewat Permissions Policy. Akibatnya getUserMedia selalu ditolak di dalam Web App
+  ELIO - bukan karena setelan HP, dan tidak bisa diperbaiki dari sisi kode. Satu-satunya jalan ke
+  kamera langsung adalah menyajikan halaman pemindainya dari domain https biasa, lalu mengirim
+  hasilnya ke Apps Script lewat doPost.
+
+  Cara pakai (sekali saja):
+    1. Unggah berkas ini ke hosting statis gratis - GitHub Pages, Netlify, atau Cloudflare Pages.
+    2. Buka alamatnya di HP (WAJIB https, kamera tidak jalan di http).
+    3. Tempel URL Web App ELIO (.../exec), lalu login dengan user ELIO yang sama.
+    Sesudah itu URL dan sesi diingat di HP - buka, arahkan, selesai.
+
+  Yang TIDAK dilakukan halaman ini:
+    - Tidak menyimpan password. Yang disimpan hanya token sesi, dan token itu kedaluwarsa sendiri.
+    - Tidak memuat pustaka dari luar sama sekali. BarcodeDetector adalah fasilitas bawaan peramban.
+    - Tidak menyentuh data lain di Spreadsheet. Satu-satunya yang dikirim adalah nomor resi.
+-->
+<style>
+:root{
+  --latar:#0d1117; --panel:#161b22; --garis:#283041; --teks:#e6edf3; --redup:#8b949e;
+  --hijau:#2ea043; --hijau-lembut:#10301c; --merah:#da3633; --merah-lembut:#3a1416;
+  --kuning:#d29922; --kuning-lembut:#332701; --biru:#388bfd;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--latar);color:var(--teks);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  padding:0 14px 40px;-webkit-text-size-adjust:100%}
+.bungkus{max-width:560px;margin:0 auto}
+header{display:flex;align-items:center;gap:10px;padding-block:14px;
+  position:sticky;top:0;background:var(--latar);z-index:5;border-bottom:1px solid var(--garis)}
+header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.02em}
+header .siapa{margin-left:auto;font-size:12px;color:var(--redup);text-align:right}
+.kartu{background:var(--panel);border:1px solid var(--garis);border-radius:14px;padding:14px;margin-top:12px}
+label{display:block;font-size:12px;color:var(--redup);margin-bottom:5px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.06em}
+input{width:100%;padding:13px;border-radius:10px;border:1px solid var(--garis);
+  background:#0b0f16;color:var(--teks);font:inherit;margin-bottom:12px}
+input:focus{outline:2px solid var(--biru);outline-offset:-1px}
+button{width:100%;padding:14px;border-radius:10px;border:0;background:var(--biru);color:#fff;
+  font:inherit;font-weight:700;cursor:pointer}
+button.sunyi{background:transparent;color:var(--redup);border:1px solid var(--garis);font-weight:600}
+button:disabled{opacity:.5}
+.baris{display:flex;gap:8px}
+.pesan{padding:11px 13px;border-radius:10px;font-size:13px;margin-top:10px;border:1px solid var(--garis)}
+.pesan.ok{background:var(--hijau-lembut);border-color:var(--hijau)}
+.pesan.gagal{background:var(--merah-lembut);border-color:var(--merah)}
+.pesan.awas{background:var(--kuning-lembut);border-color:var(--kuning)}
+#kotakVideo{position:relative;border-radius:14px;overflow:hidden;background:#000;margin-top:12px}
+video{width:100%;display:block;max-height:56vh;object-fit:cover}
+.bidik{position:absolute;left:7%;right:7%;top:36%;height:26%;
+  border:2px solid rgba(255,255,255,.9);border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.32)}
+.hitung{display:flex;gap:10px;margin-top:12px}
+.hitung div{flex:1;background:var(--panel);border:1px solid var(--garis);border-radius:12px;
+  padding:11px;text-align:center}
+.hitung b{display:block;font-size:26px;font-variant-numeric:tabular-nums;line-height:1.1}
+.hitung span{font-size:11px;color:var(--redup);text-transform:uppercase;letter-spacing:.06em}
+ul{list-style:none;padding:0;margin:10px 0 0;max-height:210px;overflow:auto}
+li{display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:9px;background:var(--panel);
+  margin-bottom:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+li .tanda{width:18px;text-align:center;flex-shrink:0}
+li.tersimpan .tanda{color:var(--hijau)} li.antri .tanda{color:var(--kuning)}
+li.gagal{background:var(--merah-lembut)} li.gagal .tanda{color:var(--merah)}
+li .kapan{margin-left:auto;font-family:inherit;font-size:11px;color:var(--redup)}
+.sub{font-size:12px;color:var(--redup);margin-top:8px}
+.sub b{color:var(--teks)}
+details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="bungkus">
+
+<header>
+  <h1>ELIO &middot; Scan Kamera</h1>
+  <div class="siapa" id="siapa"></div>
+</header>
+
+<!-- ===== 1. PENGATURAN + LOGIN ===== -->
+<section id="layarMasuk" class="kartu">
+  <label for="url">URL Web App ELIO</label>
+  <input id="url" type="url" inputmode="url" autocomplete="off"
+         placeholder="https://script.google.com/macros/s/.../exec">
+  <div class="sub" style="margin:-6px 0 12px">Ambil dari Spreadsheet: menu <b>ELIO &rsaquo; Lihat URL Web App</b>. Cukup sekali &mdash; sesudah itu diingat di HP ini.</div>
+  <label for="user">Username ELIO</label>
+  <input id="user" autocomplete="username" autocapitalize="none" spellcheck="false">
+  <label for="sandi">Password</label>
+  <input id="sandi" type="password" autocomplete="current-password">
+  <button id="tblMasuk">Masuk</button>
+  <div id="pesanMasuk"></div>
+</section>
+
+<!-- ===== 2. LAYAR SCAN ===== -->
+<section id="layarScan" hidden>
+  <div id="pesanKamera" class="pesan awas">Menyalakan kamera&hellip;</div>
+
+  <div id="kotakVideo" hidden>
+    <video id="video" playsinline muted autoplay></video>
+    <div class="bidik"></div>
+  </div>
+
+  <div class="hitung">
+    <div><b id="nScan">0</b><span>Discan</span></div>
+    <div><b id="nSimpan">0</b><span>Tersimpan</span></div>
+    <div><b id="nTolak">0</b><span>Ditolak</span></div>
+  </div>
+
+  <div id="pesanScan"></div>
+
+  <ul id="daftar"></ul>
+
+  <div class="kartu">
+    <label for="catatan">Catatan (opsional)</label>
+    <input id="catatan" placeholder="mis. Pickup JNE sore">
+    <label for="manual">Ketik manual / alat scan</label>
+    <input id="manual" autocomplete="off" autocapitalize="characters" spellcheck="false"
+           placeholder="Ketik nomor resi lalu Enter">
+    <div class="baris" style="margin-top:4px">
+      <button class="sunyi" id="tblUlang">Nyalakan ulang kamera</button>
+      <button class="sunyi" id="tblKeluar">Keluar</button>
+    </div>
+  </div>
+
+  <details>
+    <summary>Kenapa halaman ini terpisah dari ELIO?</summary>
+    <div class="sub">Google menjalankan Web App ELIO di dalam bingkai yang tidak meneruskan izin kamera,
+    jadi kamera langsung selalu ditolak di sana &mdash; itu batasan Google, bukan setelan HP Anda.
+    Halaman ini berjalan di alamat https biasa, sehingga kamera diizinkan. Nomor resi yang terbaca
+    dikirim ke Spreadsheet ELIO yang sama, lewat jalur penyimpanan yang sama persis &mdash; termasuk
+    penolakan resi kembar. Tabel <b>Scan Barcode</b> di ELIO akan menampilkannya.</div>
+  </details>
+</section>
+
+</div>
+
+<script>
+'use strict';
+
+/* ===================== Penyimpanan kecil di HP ===================== */
+var KUNCI_URL='elioScanUrl', KUNCI_TOKEN='elioScanToken', KUNCI_USER='elioScanUser';
+function ambil(k){ try{ return localStorage.getItem(k)||''; }catch(e){ return ''; } }
+function simpan(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+function buang(k){ try{ localStorage.removeItem(k); }catch(e){} }
+
+var el = function(id){ return document.getElementById(id); };
+
+/* ===================== Bicara dengan Apps Script =====================
+   Content-Type sengaja text/plain. application/json akan memicu permintaan preflight OPTIONS, dan
+   Apps Script tidak bisa menjawab preflight sama sekali - permintaannya gagal sebelum sempat
+   terkirim. Isi permintaannya tetap JSON; doPost yang mem-parse-nya.
+   Apps Script juga tidak bisa mengatur kode status HTTP, jadi berhasil/gagal HARUS dibaca dari
+   kolom "status" di dalam balasan, bukan dari response.ok. */
+function kirimKeElio(muatan){
+  var url=ambil(KUNCI_URL);
+  if(!url) return Promise.reject(new Error('URL Web App ELIO belum diisi.'));
+  return fetch(url,{
+    method:'POST', redirect:'follow',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify(muatan)
+  }).then(function(r){ return r.text(); }).then(function(teks){
+    var data;
+    try{ data=JSON.parse(teks); }
+    catch(e){
+      /* Balasan berupa HTML hampir selalu berarti satu hal: deployment-nya tidak disetel
+         "Who has access: Anyone", jadi yang dikirim balik Google adalah halaman login. */
+      throw new Error('Balasan server bukan JSON. Biasanya karena deployment Web App belum disetel "Who has access: Anyone".');
+    }
+    if(!data || data.status!=='ok') throw new Error((data&&data.pesan)||'Server menolak permintaan.');
+    return data;
+  });
+}
+
+/* ===================== Bunyi ===================== */
+var ctx=null;
+function konteks(){
+  try{
+    if(!ctx){ var C=window.AudioContext||window.webkitAudioContext; if(!C) return null; ctx=new C(); }
+    if(ctx.state==='suspended') ctx.resume();
+    return ctx;
+  }catch(e){ return null; }
+}
+function nada(c,mulai,hz,hzAkhir,lama,keras){
+  var o=c.createOscillator(), g=c.createGain();
+  o.type='square'; o.frequency.setValueAtTime(hz,mulai);
+  if(hzAkhir) o.frequency.linearRampToValueAtTime(hzAkhir,mulai+lama);
+  g.gain.setValueAtTime(0,mulai);
+  g.gain.linearRampToValueAtTime(keras,mulai+0.008);
+  g.gain.setValueAtTime(keras,mulai+lama-0.008);
+  g.gain.linearRampToValueAtTime(0,mulai+lama);
+  o.connect(g); g.connect(c.destination);
+  o.start(mulai); o.stop(mulai+lama+0.02);
+}
+function getar(pola){ try{ if(navigator.vibrate) navigator.vibrate(pola); }catch(e){} }
+function bunyi(jenis){
+  var c=konteks(); var t=c?c.currentTime:0;
+  if(jenis==='ok'){        if(c) nada(c,t,880,1046,0.09,0.16); getar(40); }
+  else if(jenis==='kembar'){ if(c){ nada(c,t,392,0,0.12,0.18); nada(c,t+0.2,392,0,0.12,0.18); } getar([120,80,120]); }
+  else {                   if(c) nada(c,t,330,180,0.45,0.2); getar([90,70,90,70,220]); }
+}
+
+/* ===================== Keadaan ===================== */
+var daftar=[];              /* {resi, status: 'antri'|'tersimpan'|'gagal', jam} */
+var sudahAda={};            /* penyaring kembar di HP, sebelum menyentuh server sama sekali */
+var antri=[];
+var sedangKirim=false, jadwal=null;
+var JEDA_KIRIM_MS=800, MAKS_SEKALI=25;
+var aliran=null, pemindai=null, detektor=null;
+
+function jamSekarang(){
+  var d=new Date(), p=function(n){ return (n<10?'0':'')+n; };
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function normal(v){ return String(v==null?'':v).replace(/\s+/g,'').toUpperCase(); }
+
+function gambar(){
+  var ul=el('daftar'); ul.innerHTML='';
+  var tanda={antri:'○', tersimpan:'✓', gagal:'✕'};
+  for(var i=daftar.length-1;i>=0;i--){
+    var d=daftar[i], li=document.createElement('li');
+    li.className=d.status;
+    li.innerHTML='<span class="tanda">'+tanda[d.status]+'</span><span>'+d.resi+'</span>'+
+                 '<span class="kapan">'+d.jam+'</span>';
+    ul.appendChild(li);
+  }
+  el('nScan').textContent=daftar.length;
+  el('nSimpan').textContent=daftar.filter(function(d){ return d.status==='tersimpan'; }).length;
+}
+function pesan(kotak,kelas,teks){
+  var e=el(kotak);
+  if(!teks){ e.innerHTML=''; e.className=''; return; }
+  e.className='pesan '+kelas; e.textContent=teks;
+}
+
+var nTolak=0;
+function tambah(v){
+  var resi=normal(v);
+  if(!resi) return;
+  if(sudahAda[resi]){
+    nTolak++; el('nTolak').textContent=nTolak;
+    bunyi('kembar');
+    pesan('pesanScan','gagal','DITOLAK — resi '+resi+' sudah discan di sesi ini.');
+    return;
+  }
+  sudahAda[resi]=true;
+  daftar.push({resi:resi,status:'antri',jam:jamSekarang()});
+  antri.push(resi);
+  bunyi('ok');
+  pesan('pesanScan','ok','Terbaca: '+resi);
+  gambar();
+  jadwalkan();
+}
+function jadwalkan(){
+  if(antri.length>=MAKS_SEKALI) return kirim();
+  if(jadwal) clearTimeout(jadwal);
+  jadwal=setTimeout(kirim,JEDA_KIRIM_MS);
+}
+function tandai(batch,status){
+  daftar.forEach(function(d){ if(batch.indexOf(d.resi)>-1) d.status=status; });
+}
+function kirim(){
+  if(jadwal){ clearTimeout(jadwal); jadwal=null; }
+  if(sedangKirim || !antri.length) return;
+  sedangKirim=true;
+  var batch=antri.splice(0,MAKS_SEKALI);
+  kirimKeElio({aksi:'scan', token:ambil(KUNCI_TOKEN), resi:batch, catatan:el('catatan').value||''})
+    .then(function(h){
+      var lewat=(h.dilewati||[]).map(normal);
+      tandai(batch.filter(function(r){ return lewat.indexOf(r)<0; }),'tersimpan');
+      if(lewat.length){
+        tandai(lewat,'gagal');
+        nTolak+=lewat.length; el('nTolak').textContent=nTolak;
+        bunyi('kembar');
+        pesan('pesanScan','gagal',lewat.length+' resi ditolak server karena sudah pernah discan sebelumnya: '+lewat.slice(0,3).join(', '));
+      }
+    })
+    .catch(function(e){
+      /* Nomornya dikembalikan ke antrean, bukan dibuang. Jaringan gudang sering putus sebentar,
+         dan paket yang sudah ditembak tidak boleh hilang hanya karena itu. */
+      tandai(batch,'gagal');
+      antri=batch.concat(antri);
+      bunyi('gagal');
+      var kehabisanSesi=/[Ss]esi/.test(e.message||'');
+      pesan('pesanScan','gagal','Gagal mengirim: '+(e.message||e)+(kehabisanSesi?' Masuk lagi untuk melanjutkan.':' Nomornya masih tersimpan dan akan dicoba lagi.'));
+      if(kehabisanSesi) keluar(true);
+    })
+    .then(function(){
+      sedangKirim=false; gambar();
+      if(antri.length) jadwalkan();
+    });
+}
+
+/* ===================== Kamera ===================== */
+function siapkanDetektor(){
+  if(typeof BarcodeDetector==='undefined') return Promise.resolve(null);
+  return BarcodeDetector.getSupportedFormats().then(function(jenis){
+    /* Resi kurir Indonesia hampir selalu Code 128; sisanya disertakan supaya label marketplace
+       dengan format lain tetap terbaca. */
+    var mau=['code_128','code_39','ean_13','itf','qr_code','codabar'].filter(function(f){ return jenis.indexOf(f)>-1; });
+    return new BarcodeDetector(mau.length?{formats:mau}:undefined);
+  }).catch(function(){ return null; });
+}
+var BATAS=[{video:{facingMode:{ideal:'environment'}}},{video:{facingMode:'environment'}},{video:true}];
+function bukaAliran(){
+  var i=0, terakhir=null;
+  function coba(){
+    if(i>=BATAS.length) return Promise.reject(terakhir||new Error('kamera tidak bisa dibuka'));
+    return navigator.mediaDevices.getUserMedia(BATAS[i++]).catch(function(e){
+      terakhir=e;
+      var n=e&&e.name||'';
+      /* Izin yang ditolak tidak akan berubah karena syaratnya dilonggarkan - berhenti supaya
+         pertanyaan izin tidak muncul berulang kali. */
+      if(/NotAllowedError|SecurityError/i.test(n)) throw e;
+      return coba();
+    });
+  }
+  return coba();
+}
+function matikanKamera(){
+  if(pemindai){ clearTimeout(pemindai); pemindai=null; }
+  if(aliran){ try{ aliran.getTracks().forEach(function(t){ t.stop(); }); }catch(e){} aliran=null; }
+  el('video').srcObject=null;
+  el('kotakVideo').hidden=true;
+}
+function nyalakanKamera(){
+  matikanKamera();
+  pesan('pesanKamera','awas','Menyalakan kamera… pilih Izinkan kalau ditanya.');
+  if(!window.isSecureContext){
+    pesan('pesanKamera','gagal','Halaman ini harus dibuka lewat https. Di http, peramban tidak akan pernah memberikan akses kamera.');
+    return;
+  }
+  if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
+    pesan('pesanKamera','gagal','Peramban ini tidak menyediakan akses kamera. Pakai Chrome di Android, atau ketik nomor resi manual di bawah.');
+    return;
+  }
+  siapkanDetektor().then(function(d){
+    detektor=d;
+    if(!d){
+      pesan('pesanKamera','gagal','Peramban ini belum bisa membaca barcode (biasanya Safari di iPhone). Pakai Chrome di Android, atau ketik / tembak nomor resi ke kotak di bawah.');
+      return;
+    }
+    return bukaAliran().then(function(a){
+      aliran=a;
+      var v=el('video');
+      v.srcObject=a;
+      /* play() sengaja TIDAK ditunggu. Di sebagian peramban janjinya tidak pernah selesai (autoplay
+         ditahan, tab sedang di latar), dan menunggunya membuat layar berhenti di "Menyalakan
+         kamera..." selamanya padahal kameranya sendiri sudah hidup. Pembacaan barcode tidak butuh
+         play() selesai - gambar pertama yang belum siap hanya membuat satu putaran 400 ms terlewat. */
+      var janji=v.play();
+      if(janji&&janji.catch) janji.catch(function(){});
+      el('kotakVideo').hidden=false;
+      pesan('pesanKamera','ok','Kamera aktif. Arahkan barcode resi ke dalam kotak — nomornya masuk sendiri.');
+      baca();
+    });
+  }).catch(function(e){
+    var n=e&&e.name||'';
+    var sebab = /NotAllowedError|SecurityError/i.test(n) ? 'izin kamera ditolak. Ketuk ikon gembok di sebelah alamat → Setelan situs → Kamera → Izinkan, lalu tekan "Nyalakan ulang kamera".'
+      : /NotFoundError|OverconstrainedError/i.test(n) ? 'tidak ada kamera yang bisa dipakai di perangkat ini.'
+      : /NotReadableError/i.test(n) ? 'kameranya sedang dipakai aplikasi lain. Tutup aplikasi kamera lalu coba lagi.'
+      : (e&&e.message)||n||'sebab tidak diketahui';
+    pesan('pesanKamera','gagal','Kamera tidak bisa dibuka — '+sebab+' ['+(n||'?')+']');
+  });
+}
+function baca(){
+  if(!aliran||!detektor) return;
+  detektor.detect(el('video')).then(function(hasil){
+    if(hasil&&hasil.length) tambah(hasil[0].rawValue);
+  }).catch(function(){}).then(function(){
+    /* 400 ms: terasa seketika, tapi cukup jarang supaya satu barcode tidak terbaca berkali-kali
+       dan baterai HP tidak terkuras. */
+    if(aliran) pemindai=setTimeout(baca,400);
+  });
+}
+
+/* ===================== Masuk / keluar ===================== */
+function tampilkanScan(nama){
+  el('layarMasuk').hidden=true;
+  el('layarScan').hidden=false;
+  el('siapa').textContent=nama||'';
+  konteks();                 /* disiapkan selagi masih di dalam ketukan user, supaya bunyi keluar */
+  nyalakanKamera();
+}
+function keluar(karenaSesi){
+  matikanKamera();
+  buang(KUNCI_TOKEN);
+  el('layarScan').hidden=true;
+  el('layarMasuk').hidden=false;
+  el('siapa').textContent='';
+  if(karenaSesi) pesan('pesanMasuk','awas','Sesi berakhir. Masuk lagi untuk melanjutkan — nomor yang belum terkirim tetap ada di daftar.');
+}
+
+el('tblMasuk').onclick=function(){
+  var url=el('url').value.trim();
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(url)){
+    pesan('pesanMasuk','gagal','URL Web App belum benar. Harus diakhiri /exec, contoh: https://script.google.com/macros/s/AKfy.../exec');
+    return;
+  }
+  simpan(KUNCI_URL,url);
+  var u=el('user').value.trim(), s=el('sandi').value;
+  if(!u||!s){ pesan('pesanMasuk','gagal','Username dan password harus diisi.'); return; }
+  this.disabled=true;
+  pesan('pesanMasuk','awas','Menghubungi Spreadsheet ELIO…');
+  var tbl=this;
+  konteks();
+  kirimKeElio({aksi:'login', username:u, password:s})
+    .then(function(h){
+      simpan(KUNCI_TOKEN,h.token); simpan(KUNCI_USER,h.nama||u);
+      el('sandi').value='';
+      pesan('pesanMasuk','','');
+      tampilkanScan(h.nama||u);
+    })
+    .catch(function(e){ pesan('pesanMasuk','gagal',e.message||String(e)); })
+    .then(function(){ tbl.disabled=false; });
+};
+el('tblUlang').onclick=nyalakanKamera;
+el('tblKeluar').onclick=function(){ keluar(false); };
+el('manual').addEventListener('keydown',function(e){
+  /* Alat scan Bluetooth/USB berperilaku seperti papan ketik dan menekan Enter setiap selesai
+     membaca satu barcode - jadi kotak ini sekaligus jalur untuk alat scan, bukan hanya ketik manual. */
+  if(e.key!=='Enter'&&e.keyCode!==13) return;
+  e.preventDefault();
+  tambah(this.value);
+  this.value='';
+});
+/* Antrean yang belum terkirim tidak boleh hilang begitu saja saat halaman ditutup. */
+window.addEventListener('pagehide',function(){ if(antri.length) kirim(); });
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='hidden'){ if(antri.length) kirim(); }
+});
+
+/* ===================== Mulai ===================== */
+(function(){
+  el('url').value=ambil(KUNCI_URL);
+  el('user').value=ambil(KUNCI_USER);
+  var token=ambil(KUNCI_TOKEN);
+  if(!token||!ambil(KUNCI_URL)) return;
+  /* Sesi diperiksa dulu ke server - lebih baik tahu sekarang daripada sesudah 30 paket ditembak. */
+  pesan('pesanMasuk','awas','Memeriksa sesi yang tersimpan…');
+  kirimKeElio({aksi:'cek', token:token})
+    .then(function(h){ pesan('pesanMasuk','',''); tampilkanScan(h.nama); })
+    .catch(function(){ buang(KUNCI_TOKEN); pesan('pesanMasuk','awas','Sesi sebelumnya sudah berakhir. Silakan masuk lagi.'); });
+})();
+</script>
+</body>
+</html>
