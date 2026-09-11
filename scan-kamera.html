@@ -90,7 +90,7 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
   <label for="url">URL Web App ELIO</label>
   <input id="url" type="url" inputmode="url" autocomplete="off"
          placeholder="https://script.google.com/macros/s/.../exec">
-  <div class="sub" style="margin:-6px 0 12px">Ambil dari Spreadsheet: menu <b>ELIO &rsaquo; Lihat URL Web App</b>. Cukup sekali &mdash; sesudah itu diingat di HP ini.</div>
+  <div class="sub" style="margin:-6px 0 12px" id="ketUrl">Ambil dari Spreadsheet: menu <b>ELIO &rsaquo; Lihat URL Web App</b>. Cukup sekali &mdash; sesudah itu diingat di HP ini.</div>
   <label for="user">Username ELIO</label>
   <input id="user" autocomplete="username" autocapitalize="none" spellcheck="false">
   <label for="sandi">Password</label>
@@ -153,7 +153,40 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
 'use strict';
 
 /* ===================== Penyimpanan kecil di HP ===================== */
+/* ===================== ISI SATU BARIS INI SEKALI =====================
+   Alamat Web App ELIO Anda, yang berakhiran /exec. Kalau diisi, TIDAK ADA HP yang perlu
+   menempelkannya lagi - kotak alamat di layar masuk hilang, dan halaman langsung meminta login.
+   Dibiarkan kosong = kembali ke perilaku lama (tiap HP mengetiknya sendiri, lalu diingat).
+
+   Alamat ini memang jadi ikut terbaca siapa pun yang membuka repository GitHub Anda. Yang bisa
+   mereka lakukan dengan itu: membuka layar Login ELIO - sama seperti membuka alamatnya langsung.
+   Tidak ada data yang terbuka, dan percobaan login dikunci sesudah 10 kali salah (cekBatasLogin_
+   di Auth.gs). Yang TIDAK boleh ditaruh di sini: username, password, atau token apa pun.
+
+   Contoh: var URL_WEBAPP_BAWAAN = 'https://script.google.com/macros/s/AKfy.../exec'; */
+var URL_WEBAPP_BAWAAN = 'https://script.google.com/macros/s/AKfycbwLsgEb8y2o93b0_Au-C4AgondKCxnZrKPdqufqRrjDt7P223833UjypWsz6EJwi3r7xA/exec';
+
 var KUNCI_URL='elioScanUrl', KUNCI_TOKEN='elioScanToken', KUNCI_USER='elioScanUser';
+/* Alamat yang DIPAKAI. Yang ditanam di berkas selalu menang atas yang tersimpan di HP: kalau suatu
+   saat alamatnya memang berubah, cukup unggah ulang berkas ini sekali - tidak perlu mendatangi tiap
+   HP untuk membetulkan alamat lama yang terlanjur tersimpan di sana. */
+function urlWebApp(){
+  var tanam=String(URL_WEBAPP_BAWAAN||'').trim();
+  return tanam||ambil(KUNCI_URL);
+}
+function urlDitanam(){ return !!String(URL_WEBAPP_BAWAAN||'').trim(); }
+/* Kotak alamat disembunyikan kalau sudah ditanam di berkas: satu isian lebih sedikit yang harus
+   dihadapi petugas, dan tidak ada lagi kesempatan salah ketik. Dipisah jadi fungsi bernama supaya
+   bisa dipanggil ulang dan diuji, bukan dikubur di dalam blok yang jalan sekali saat halaman dibuka. */
+function terapkanUrlBawaan_(){
+  var isian=el('url');
+  if(!isian)return;
+  isian.value=urlWebApp();
+  if(!urlDitanam())return;
+  isian.hidden=true;
+  var lbl=document.querySelector('label[for="url"]'); if(lbl)lbl.hidden=true;
+  var ket=document.getElementById('ketUrl'); if(ket)ket.hidden=true;
+}
 /* Token ALAT: didapat sekali sesudah login berhasil, lalu dipakai terus tanpa kedaluwarsa.
    Kewenangannya sengaja sempit - hanya boleh menambah baris Scan Barcode, tidak bisa membaca atau
    menghapus apa pun (lihat doPost di WebApp.gs). Karena itu menyimpannya di HP aman, sementara
@@ -172,7 +205,7 @@ var el = function(id){ return document.getElementById(id); };
    Apps Script juga tidak bisa mengatur kode status HTTP, jadi berhasil/gagal HARUS dibaca dari
    kolom "status" di dalam balasan, bukan dari response.ok. */
 function kirimKeElio(muatan){
-  var url=ambil(KUNCI_URL);
+  var url=urlWebApp();
   if(!url) return Promise.reject(new Error('URL Web App ELIO belum diisi.'));
   return fetch(url,{
     method:'POST', redirect:'follow',
@@ -459,12 +492,14 @@ function daftarkanAlat(namaAlat){
 }
 
 el('tblMasuk').onclick=function(){
-  var url=el('url').value.trim();
+  var url=urlDitanam()?urlWebApp():el('url').value.trim();
   if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(url)){
-    pesan('pesanMasuk','gagal','URL Web App belum benar. Harus diakhiri /exec, contoh: https://script.google.com/macros/s/AKfy.../exec');
+    pesan('pesanMasuk','gagal',urlDitanam()
+      ? 'URL_WEBAPP_BAWAAN di dalam berkas ini belum benar. Harus diakhiri /exec.'
+      : 'URL Web App belum benar. Harus diakhiri /exec, contoh: https://script.google.com/macros/s/AKfy.../exec');
     return;
   }
-  simpan(KUNCI_URL,url);
+  if(!urlDitanam()) simpan(KUNCI_URL,url);
   var u=el('user').value.trim(), s=el('sandi').value;
   if(!u||!s){ pesan('pesanMasuk','gagal','Username dan password harus diisi.'); return; }
   this.disabled=true;
@@ -504,10 +539,10 @@ document.addEventListener('visibilitychange',function(){
 
 /* ===================== Mulai ===================== */
 (function(){
-  el('url').value=ambil(KUNCI_URL);
+  terapkanUrlBawaan_();
   el('user').value=ambil(KUNCI_USER);
   el('alat').value=ambil(KUNCI_ALATNAMA);
-  if(!ambil(KUNCI_URL)) return;
+  if(!urlWebApp()) return;
 
   /* Urutannya penting. Token ALAT dulu: itu yang tidak kedaluwarsa, jadi jalur inilah yang dipakai
      sehari-hari - buka halaman, kamera langsung menyala, tanpa mengetik apa pun. Diperiksa dulu ke
