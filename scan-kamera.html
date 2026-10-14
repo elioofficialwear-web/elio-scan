@@ -95,11 +95,19 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
   <input id="user" autocomplete="username" autocapitalize="none" spellcheck="false">
   <label for="sandi">Password</label>
   <input id="sandi" type="password" autocomplete="current-password">
-  <label for="alat" style="margin-top:4px">Nama alat ini</label>
-  <input id="alat" autocomplete="off" placeholder="mis. HP Gudang 1 / HP Rina">
-  <div class="sub" style="margin:-6px 0 12px">Supaya HP ini tidak perlu login lagi nanti. Nama ini yang Anda lihat di ELIO kalau suatu saat perlu mencabut aksesnya.</div>
+  <label for="alat" style="margin-top:4px">Nama HP ini (wajib)</label>
+  <input id="alat" autocomplete="off" required placeholder="mis. HP Gudang 1 / HP Rina">
+  <div class="sub" style="margin:-6px 0 12px">HP ini didaftarkan dengan nama ini, jadi besok langsung masuk tanpa login. Nama ini yang tampil di ELIO &rsaquo; Scan Barcode &rsaquo; HP yang terdaftar.</div>
   <button id="tblMasuk">Masuk</button>
   <div id="pesanMasuk"></div>
+</section>
+
+<!-- ===== 3. LAYAR SELESAI ===== -->
+<section id="layarSelesai" class="kartu" hidden>
+  <h2 style="margin:0 0 6px;font-size:18px">Selesai</h2>
+  <div id="ringkasSelesai"></div>
+  <div class="sub">Halaman ini boleh ditutup. HP ini tetap terdaftar &mdash; besok buka lagi, langsung scan tanpa login.</div>
+  <button id="tblLagi" style="margin-top:14px">Scan lagi</button>
 </section>
 
 <!-- ===== 2. LAYAR SCAN ===== -->
@@ -131,10 +139,15 @@ details{margin-top:12px} summary{cursor:pointer;font-size:13px;color:var(--redup
       <button class="sunyi" id="tblBersih">Bersihkan daftar</button>
       <button class="sunyi" id="tblUlang">Nyalakan ulang kamera</button>
     </div>
-    <div class="baris" style="margin-top:8px">
-      <button class="sunyi" id="tblKeluar">Keluar dari HP ini</button>
+  </div>
+
+  <div class="kartu">
+    <button id="tblSelesai">Selesai</button>
+    <div class="sub">Mengirim sisa nomor, lalu mematikan kamera. HP ini <b>tetap terdaftar</b>: besok buka halaman ini, langsung bisa scan tanpa login.</div>
+    <div class="baris" style="margin-top:14px">
+      <button class="sunyi" id="tblKeluar">Hapus pendaftaran HP ini</button>
     </div>
-    <div class="sub">Keluar akan melupakan HP ini sepenuhnya, jadi lain kali harus login lagi. Untuk pemakaian sehari-hari cukup tutup halamannya.</div>
+    <div class="sub">Hanya kalau HP ini tidak dipakai lagi untuk scan (mis. diganti HP lain). Sesudahnya HP ini harus login lagi dengan username dan password.</div>
   </div>
 
   <details>
@@ -371,7 +384,8 @@ function kirim(){
       /* Token alat tidak kedaluwarsa, jadi pesan "sesi berakhir" hanya berlaku untuk jalur sesi
          biasa. Kalau alat yang dipakai, pesan itu berarti alatnya DICABUT - dan itu memang harus
          mengeluarkan HP ini sepenuhnya. */
-      if(kehabisanSesi||/dicabut/i.test(e.message||'')) keluar(!ambil(KUNCI_ALAT));
+      if(ambil(KUNCI_ALAT)){ if(/dicabut/i.test(e.message||'')) keluar(false); }
+      else if(kehabisanSesi) keluar(true);
     })
     .then(function(){
       sedangKirim=false; gambar();
@@ -502,11 +516,12 @@ el('tblMasuk').onclick=function(){
   if(!urlDitanam()) simpan(KUNCI_URL,url);
   var u=el('user').value.trim(), s=el('sandi').value;
   if(!u||!s){ pesan('pesanMasuk','gagal','Username dan password harus diisi.'); return; }
+  if(!el('alat').value.trim()){ pesan('pesanMasuk','gagal','Nama HP ini harus diisi, mis. HP Gudang 1. Nama ini yang tampil di daftar HP terdaftar di ELIO.'); el('alat').focus(); return; }
   this.disabled=true;
   pesan('pesanMasuk','awas','Menghubungi Spreadsheet ELIO…');
   var tbl=this;
   konteks();
-  const namaAlat=el('alat').value.trim()||'HP tanpa nama';
+  const namaAlat=el('alat').value.trim();
   kirimKeElio({aksi:'login', username:u, password:s})
     .then(function(h){
       simpan(KUNCI_TOKEN,h.token); simpan(KUNCI_USER,h.nama||u);
@@ -522,7 +537,43 @@ el('tblMasuk').onclick=function(){
 };
 el('tblBersih').onclick=bersihkanDaftar;
 el('tblUlang').onclick=nyalakanKamera;
-el('tblKeluar').onclick=function(){ keluar(false); };
+/* Selesai: sisa antrean dikirim dulu (maks. 30 detik), baru kamera dimatikan. Pendaftaran HP TIDAK
+   disentuh - inilah tombol yang dicari petugas di akhir sesi, dan dulu satu-satunya tombol di sana
+   adalah "Keluar dari HP ini", yang justru menghapus pendaftaran HP. */
+el('tblSelesai').onclick=function(){
+  var tbl=this; tbl.disabled=true;
+  pesan('pesanScan','awas','Mengirim sisa nomor…');
+  var batas=Date.now()+30000;
+  (function tunggu(){
+    if(antri.length && !sedangKirim) kirim();
+    if((antri.length||sedangKirim) && Date.now()<batas) return setTimeout(tunggu,400);
+    tbl.disabled=false;
+    matikanKamera();
+    var ok=daftar.filter(function(d){ return d.status==='tersimpan'; }).length;
+    var sisa=antri.length;
+    el('layarScan').hidden=true; el('layarSelesai').hidden=false;
+    pesan('ringkasSelesai',sisa?'gagal':'ok', ok+' resi tersimpan di ELIO'+(nTolak?', '+nTolak+' ditolak karena sudah pernah discan':'')+'.'+
+      (sisa?' '+sisa+' nomor BELUM terkirim (sinyal?). Jangan tutup halaman ini: tekan Scan lagi agar dicoba kirim ulang.':''));
+  })();
+};
+el('tblLagi').onclick=function(){
+  el('layarSelesai').hidden=true; el('layarScan').hidden=false;
+  pesan('pesanScan','','');
+  if(antri.length) jadwalkan();
+  nyalakanKamera();
+};
+el('tblKeluar').onclick=function(){
+  var tanya=['Hapus pendaftaran HP ini?','HP ini dicabut dari daftar ELIO dan lain kali harus login lagi dengan username dan password.','Untuk mengakhiri scan hari ini, tekan Selesai saja.'];
+  if(!confirm(tanya.join(String.fromCharCode(10,10)))) return;
+  var alat=ambil(KUNCI_ALAT);
+  var cabut=alat ? kirimKeElio({aksi:'cabutAlatSendiri', alat:alat}).catch(function(){}) : Promise.resolve();
+  this.disabled=true; var tbl=this;
+  cabut.then(function(){
+    tbl.disabled=false;
+    keluar(false);
+    pesan('pesanMasuk','ok','Pendaftaran HP ini sudah dihapus.');
+  });
+};
 el('manual').addEventListener('keydown',function(e){
   /* Alat scan Bluetooth/USB berperilaku seperti papan ketik dan menekan Enter setiap selesai
      membaca satu barcode - jadi kotak ini sekaligus jalur untuk alat scan, bukan hanya ketik manual. */
@@ -554,8 +605,17 @@ document.addEventListener('visibilitychange',function(){
     kirimKeElio({aksi:'cekAlat', alat:alat})
       .then(function(h){ pesan('pesanMasuk','',''); tampilkanScan(h.nama); })
       .catch(function(e){
-        buang(KUNCI_ALAT);
-        pesan('pesanMasuk','awas',(e.message||'HP ini tidak lagi terdaftar.')+' Silakan masuk lagi.');
+        /* HP ini HANYA dilupakan kalau server menjawab jelas bahwa alatnya dicabut. Dulu kegagalan
+           APA PUN - sinyal gudang putus sebentar, Google lambat menjawab - ikut menghapus pendaftaran,
+           dan HP itu tiba-tiba harus login lagi padahal tidak ada yang mencabutnya. */
+        if(/dicabut/i.test(e.message||'')){
+          buang(KUNCI_ALAT);
+          pesan('pesanMasuk','awas',e.message+' Silakan masuk lagi.');
+          return;
+        }
+        pesan('pesanMasuk','','');
+        tampilkanScan(ambil(KUNCI_ALATNAMA));
+        pesan('pesanScan','awas','Belum bisa menghubungi ELIO ('+(e.message||e)+'). Scan tetap bisa; nomornya dikirim begitu tersambung.');
       });
     return;
   }
